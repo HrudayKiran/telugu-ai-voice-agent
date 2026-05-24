@@ -1,0 +1,39 @@
+# Full-Stack Telugu AI Voice Agent GitIgnore
+
+# === Backend ===
+backend/.env
+backend/gcloud-credentials.json
+backend/agent.log
+backend/agent_debug.log
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
+backend/venv/
+
+# === Frontend ===
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+frontend/web-build/
+frontend/expo-env.d.ts
+frontend/.kotlin/
+frontend/*.orig.*
+frontend/*.jks
+frontend/*.p8
+frontend/*.p12
+frontend/*.key
+frontend/*.mobileprovision
+frontend/.metro-health-check*
+frontend/npm-debug.*
+frontend/yarn-debug.*
+frontend/yarn-error.*
+frontend/*.pem
+frontend/.env*.local
+frontend/*.tsbuildinfo
+frontend/ios/
+frontend/android/
+
+# === OS & IDE ===
+.DS_Store
+.vscode/
+.idea/
