@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import os
 import sys
@@ -10,37 +9,18 @@ from loguru import logger
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=dotenv_path, override=True)
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.processors.audio.vad_processor import VADProcessor
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask, PipelineParams
-from pipecat.services.groq.stt import GroqSTTService
-from pipecat.services.groq.llm import GroqLLMService
-from pipecat.services.google.tts import GoogleHttpTTSService
-from pipecat.transports.livekit.transport import LiveKitTransport, LiveKitParams
-from pipecat.processors.frame_processor import FrameProcessor
-from pipecat.frames.frames import (
-    Frame, TranscriptionFrame, TextFrame, TTSSpeakFrame, EndFrame,
-    UserAudioRawFrame, TTSAudioRawFrame,
-)
+from livekit import agents
+from livekit.agents import AgentSession, Agent, TurnHandlingOptions, JobContext, cli
+from livekit.plugins import groq, google, silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.transcriptions.language import Language
-
-# Google Cloud TTS is used via GoogleHttpTTSService (imported above)
-
-# Configure loguru logger for debugging
-# Note: PYTHONIOENCODING=utf-8 is set by main.py subprocess env,
-# so sys.stdout is already UTF-8. encoding= is only valid for file sinks.
+# Configure logger
 logger.remove()
 logger.add(
     sys.stdout, 
     level="DEBUG",
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:7}</level> | {message}",
 )
-# Also log to file with UTF-8 for persistent debugging
 logger.add(
     os.path.join(os.path.dirname(__file__), "agent_debug.log"),
     level="DEBUG",
@@ -49,218 +29,150 @@ logger.add(
     rotation="5 MB",
 )
 
-class FrameLogger(FrameProcessor):
-    """
-    Debug FrameProcessor to trace the flow of frames through the pipeline.
-    Filters out high-frequency audio frames to keep logs readable.
-    """
-    def __init__(self, name: str):
-        super().__init__()
-        self._name = name
+class TeluguAssistant(Agent):
+    def __init__(self, system_instruction: str):
+        super().__init__(instructions=system_instruction)
 
-    async def process_frame(self, frame: Frame, direction):
-        # Only log non-audio frames to avoid flooding logs
-        # (UserAudioRawFrame fires 50+ times/second)
-        if not isinstance(frame, (UserAudioRawFrame, TTSAudioRawFrame)):
-            logger.info(f"[{self._name}] Frame: {frame.__class__.__name__}")
-        await super().process_frame(frame, direction)
-        await self.push_frame(frame, direction)
+async def entrypoint(ctx: JobContext):
+    logger.info(f"Starting agent session for room: {ctx.room.name}")
+    
+    # Connect to room
+    await ctx.connect()
 
-class TranscriptSender(FrameProcessor):
-    """
-    Custom Pipecat FrameProcessor to intercept user transcription frames
-    and assistant text frames (sentences) and send them as JSON data
-    messages over the LiveKit data channel to the client app.
-    """
-    def __init__(self, transport: LiveKitTransport):
-        super().__init__()
-        self._transport = transport
+    # Wait for the client user to join to read their selected role metadata
+    logger.info("Waiting for client user participant to join...")
+    user_participant = await ctx.wait_for_participant()
+    persona = user_participant.metadata or "support"
+    logger.info(f"User joined. Selected persona role: {persona}")
 
-    async def process_frame(self, frame: Frame, direction):
-        await super().process_frame(frame, direction)
-        
-        try:
-            # User speech transcription completed
-            if isinstance(frame, TranscriptionFrame):
-                logger.info(f"User transcribed: {frame.text}")
-                payload = json.dumps({
-                    "type": "user_transcript",
-                    "text": frame.text
-                })
-                await self._transport.send_message(payload)
-                
-            # Bot sentence completed
-            elif isinstance(frame, TextFrame):
-                text = frame.text.strip()
-                # Ensure we only send readable text (filter out control sequences/metadata)
-                if text and not text.startswith("{") and not text.endswith("}"):
-                    logger.info(f"Bot speaking: {text}")
-                    payload = json.dumps({
-                        "type": "bot_transcript",
-                        "text": text
-                    })
-                    await self._transport.send_message(payload)
-        except Exception as e:
-            logger.error(f"Error in TranscriptSender broadcasting data: {e}")
-
-        await self.push_frame(frame, direction)
-
-
-async def main():
-    parser = argparse.ArgumentParser(description="AI Telugu Voice Agent Bot")
-    parser.add_argument("--url", required=True, help="LiveKit Server URL")
-    parser.add_argument("--token", required=True, help="LiveKit Access Token")
-    parser.add_argument("--room", required=True, help="LiveKit Room Name")
-    args = parser.parse_args()
-
-    logger.info(f"Starting agent process for room: {args.room}")
-
-    # 1. Initialize LiveKit transport
-    transport = LiveKitTransport(
-        url=args.url,
-        token=args.token,
-        room_name=args.room,
-        params=LiveKitParams(
-            audio_in_enabled=True,
-            audio_in_sample_rate=16000,   # STT (Whisper) expects 16kHz
-            audio_out_enabled=True,
-            audio_out_sample_rate=24000,  # TTS (Murf) outputs 24kHz
+    # Dynamically define system instruction prompt and greeting based on the selected persona
+    if persona == "prank":
+        system_instruction = (
+            "You are Navya, a highly romantic, passionate, and slightly dramatic Telugu girl who is pranking the user! "
+            "Adopt the role of an old friend (or a secret admirer) who is calling to confess your deep, mad love for him! "
+            "Say that you have been in love with him for years, you can't live without him, and you want to marry him immediately. "
+            "Make up funny, romantic stories about how you fell in love (e.g. seeing him at a coffee shop or college), "
+            "persist in your passionate marriage proposal, and play along with his reactions in a funny, playful, and highly dramatic way. "
+            "Use highly casual, natural everyday code-mixed Telugu-English (Telish) phrasing, just like real romantic/love confessions. "
+            "Avoid dry, formal, or bookish dictionary Telugu. Keep your responses short, fast, and highly engaging (1 to 2 sentences max). "
+            "Do not use markdown, emojis, list formatting, or asterisks (*)."
         )
-    )
-
-    # 2. Initialize STT (Groq Whisper) — using the Settings class (canonical API)
-    stt = GroqSTTService(
-        api_key=os.getenv("GROQ_API_KEY"),
-        settings=GroqSTTService.Settings(
-            model="whisper-large-v3-turbo",
-            language=Language.TE  # Telugu — use the Language enum
+        greeting_text = "హలో! నేనమ్మ నవ్యను... నా వాయిస్ గుర్తుపట్టలేదా? నీకు ఒక విషయం చెప్పాలి, నేను నిన్ను చాలా కాలంగా ప్రేమిస్తున్నాను, నన్ను పెళ్లి చేసుకుంటావా?"
+    elif persona == "real_estate":
+        system_instruction = (
+            "You are Navya, a highly persuasive, professional, and knowledgeable real estate consultant in Hyderabad. "
+            "Help the user find open plots, gated community apartments, or villas in prime locations like Gachibowli, Kokapet, or Miyapur. "
+            "Ask about their budget, BHK requirement, preferred location, and investment goals, guiding them through a real-life property search flow. "
+            "Use natural, conversational daily-use Telugu mixed with English real estate terms (Telish) (e.g. flat, duplex villa, BHK, gated community, open plots, price, registration, amenities). "
+            "Never use dry, formal bookish Telugu. Keep your responses short, engaging, and highly professional (1 to 2 sentences max). "
+            "Do not use markdown, emojis, list formatting, or asterisks (*)."
         )
-    )
+        greeting_text = "హలో అండీ! నేను నవ్యను, మీ రియల్ ఎస్టేట్ అడ్వైజర్ ని. ప్రెసెంట్ హైదరాబాద్ ప్రైమ్ లొకేషన్స్ లో ఓపెన్ ప్లాట్స్ మరియు ఫ్లాట్స్ కి చాలా డిమాండ్ ఉంది, మీ బడ్జెట్ అండ్ రిక్వైర్మెంట్ చెప్పండి!"
+    else:  # support
+        system_instruction = (
+            "You are Navya, a polite, professional, and super helpful customer support executive for 'Navya Delivery Services'. "
+            "Speak like a real friendly customer support agent handling delivery, orders, payments, and tracking issues. "
+            "Ask the user for details like order ID, tracking number, or payment mode, and follow the flow naturally based on their answers, just like real agents do in real-life situations. "
+            "Use modern, everyday conversational Telugu mixed with English business/service terms (Telish) naturally (e.g. order, tracking, delivery status, refund, payment, cash on delivery). "
+            "Never use bookish, old, or dry formal dictionary Telugu. Be highly supportive and warm. Keep responses extremely concise (1 to 2 sentences max). "
+            "Do not use markdown, emojis, list formatting, or asterisks (*)."
+        )
+        greeting_text = "నమస్కారం అండీ! నా పేరు నవ్య, నవ్య డెలివరీ సర్వీసెస్ నుండి మాట్లాడుతున్నాను. మీ ఆర్డర్ డెలివరీ లేదా పేమెంట్ కి సంబంధించి నేను మీకు ఎలా సహాయపడగలను?"
 
-    # 3. Configure LLM Prompt & Initialize Google Gemini LLM
-    system_instruction = (
-        "You are Navya, a friendly Telugu AI voice assistant. "
-        "Always respond in Telugu language. "
-        "Keep your responses very short, conversational, and natural (1 to 2 sentences max). "
-        "Do not use markdown, asterisks (*), emojis, list formatting, or bullet points, as your response will be spoken aloud. "
-        "Example response: నమస్కారం! నేను మీకు ఎలా సహాయపడగలను?"
+    credentials_path = os.path.join(
+        os.path.dirname(__file__), 
+        os.getenv("GOOGLE_CLOUD_CREDENTIALS_PATH", "gcloud-credentials.json")
     )
     
-    messages = [
-        {
-            "role": "system",
-            "content": system_instruction
-        }
-    ]
-    context = LLMContext(messages=messages)
+    voice_name = os.getenv("GOOGLE_TTS_VOICE", "te-IN-Chirp3-HD-Achernar")
     
-    llm = GroqLLMService(
-        api_key=os.getenv("GROQ_API_KEY"),
-        settings=GroqLLMService.Settings(
-            model="llama-3.3-70b-versatile",
-            temperature=0.7
-        )
+    # Biased STT prompt written IN TELUGU script to prevent Whisper from translating Telugu to English
+    stt_prompt = (
+        "హలో అండీ! నేను నవ్యను. కస్టమర్ సపోర్ట్ రీఛార్జ్ ప్లాన్ రియల్ ఎస్టేట్ ఫ్లాట్ ప్రైస్ గేటెడ్ కమ్యూనిటీ ఓపెన్ ప్లాట్స్ లొకేషన్ బడ్జెట్ "
+        "ప్రాంక్ చికెన్ బిర్యానీ డెలివరీ ట్రాకింగ్ పేమెంట్ ఆర్డర్ రీఫండ్ క్యాష్ ఆన్ డెలివరీ ప్రేమిస్తున్నాను పెళ్లి చేసుకుంటావా లవ్."
     )
-
-    # 4. Initialize Google Cloud TTS Service (WaveNet Telugu voice)
-    credentials_path = os.path.join(os.path.dirname(__file__), os.getenv("GOOGLE_CLOUD_CREDENTIALS_PATH", "gcloud-credentials.json"))
-    tts = GoogleHttpTTSService(
-        credentials_path=credentials_path,
-        settings=GoogleHttpTTSService.Settings(
-            voice=os.getenv("GOOGLE_TTS_VOICE", "te-IN-Chirp3-HD-Achernar"),
-            language=Language.TE,
+    
+    session = AgentSession(
+        stt=groq.STT(
+            model="whisper-large-v3-turbo", 
+            language="te",
+            api_key=os.getenv("GROQ_API_KEY"),
+            prompt=stt_prompt  # ← Telugu script prompt to enforce Telugu output & mixed English words
         ),
-        sample_rate=24000,
+        llm=groq.LLM(
+            model="llama-3.3-70b-versatile",
+            api_key=os.getenv("GROQ_API_KEY"),
+            temperature=0.75
+        ),
+        tts=google.TTS(
+            voice_name=voice_name,
+            credentials_file=credentials_path,
+            language="te-in"
+        ),
+        vad=silero.VAD.load(
+            min_silence_duration=0.8,  # ← Increased to 0.8s to give natural pauses for fast-paced speech
+            activation_threshold=0.35, # ← Lowered to 0.35 to capture fast or quiet Telugu/English words easily
+            min_speech_duration=0.05
+        ),
+        turn_handling=TurnHandlingOptions(
+            turn_detection=MultilingualModel()
+        ),
+        allow_interruptions=True,       # ← Guarantee active real-time barge-in
+        min_interruption_duration=0.2, # ← 200ms user speech triggers immediate stop
+        min_interruption_words=1        # ← First word spoken immediately stops the bot speaking
     )
-
-    # 5. Context Aggregator Pair for tracking conversation history
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
     
-    # 6. Initialize custom Transcript Sender
-    transcript_sender = TranscriptSender(transport)
-
-    # 7. Create VAD processor (Silero VAD → pushes VADUserStarted/StoppedSpeakingFrame)
-    #    This is REQUIRED for SegmentedSTTService (GroqSTTService) to know when
-    #    the user starts/stops speaking so it can segment audio for transcription.
-    vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
-
-    # 8. Build the pipeline
-    #    Flow: Input → VAD → STT → UserAgg → LLM → TranscriptSender → TTS → Output → AssistantAgg
-    pipeline = Pipeline([
-        transport.input(),                 # LiveKit Audio Input
-        vad,                               # VAD (Silero) — MUST be before STT
-        FrameLogger("Post-VAD"),
-        stt,                               # STT (Groq Whisper)
-        FrameLogger("Post-STT"),
-        user_aggregator,                   # User Context Aggregator
-        llm,                               # LLM (Groq Llama 3.3 70B)
-        FrameLogger("Post-LLM"),
-        transcript_sender,                 # Broadcast transcripts to client
-        tts,                               # TTS (Google Cloud WaveNet)
-        FrameLogger("Post-TTS"),
-        transport.output(),                # LiveKit Audio Output
-        assistant_aggregator               # Assistant Context Aggregator
-    ])
-
-    # 9. Setup Runner and Task
-    runner = PipelineRunner()
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(
-            enable_metrics=True,
-        )
-    )
-
-    # 9. Event Handlers
-    has_greeted = False
-
-    @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(transport, participant, *args, **kwargs):
-        nonlocal has_greeted
-        if has_greeted:
-            logger.info("Greeting already sent, skipping duplicate trigger.")
-            return
-        has_greeted = True
-
-        participant_id = participant.identity if hasattr(participant, 'identity') else str(participant)
-        logger.info(f"User joined the room: {participant_id}")
-        
-        # Greet the user in Telugu
-        greeting_text = "హలో! నేను నవ్యను, మీ తెలుగు సహాయకురాలిని. మీకు ఎలా సహాయపడగలను?"
-        logger.info("Sending greeting TTSSpeakFrame to pipeline...")
-        
-        # Wait a moment for connection to stabilize
-        await asyncio.sleep(1.5)
-        
-        # Broadcast the greeting transcript to the data channel
-        try:
+    # Event: User speech transcribed
+    @session.on("user_input_transcribed")
+    def on_user_input(event):
+        if event.is_final and event.transcript.strip():
+            logger.info(f"User transcribed: {event.transcript.strip()}")
             payload = json.dumps({
-                "type": "bot_transcript",
-                "text": greeting_text
+                "type": "user_transcript",
+                "text": event.transcript.strip()
             })
-            await transport.send_message(payload)
-            logger.info("Greeting transcript sent to data channel")
-        except Exception as e:
-            logger.error(f"Failed to send greeting transcript: {e}")
+            # Broadcast user transcript to frontend over LiveKit data channel
+            asyncio.create_task(ctx.room.local_participant.publish_data(payload))
             
-        # Queue the greeting for TTS synthesis and playback
-        await task.queue_frame(TTSSpeakFrame(text=greeting_text))
-        logger.info("TTSSpeakFrame queued successfully")
+    # Event: Conversation item added (assistant message generated)
+    @session.on("conversation_item_added")
+    def on_item_added(event):
+        # Safely check event item attributes to prevent AttributeError on AgentHandoff items
+        if hasattr(event.item, "role") and event.item.role == "assistant":
+            text = getattr(event.item, "text_content", None)
+            if text and text.strip():
+                logger.info(f"Bot speaking: {text.strip()}")
+                payload = json.dumps({
+                    "type": "bot_transcript",
+                    "text": text.strip()
+                })
+                # Broadcast bot transcript to frontend over LiveKit data channel
+                asyncio.create_task(ctx.room.local_participant.publish_data(payload))
 
-    @transport.event_handler("on_participant_left")
-    async def on_participant_left(transport, participant, *args, **kwargs):
-        participant_id = participant.identity if hasattr(participant, 'identity') else str(participant)
-        logger.info(f"User left the room: {participant_id}")
-        await task.queue_frame(EndFrame())
+    # Event: Session closed
+    @session.on("close")
+    def on_close(event):
+        logger.info("AgentSession closed.")
 
-    # 10. Run the bot
-    try:
-        logger.info("Starting pipeline runner...")
-        await runner.run(task)
-    except Exception as e:
-        logger.error(f"Error running pipeline: {e}", exc_info=True)
-    finally:
-        logger.info("Agent process completed.")
+    # Event: Session error
+    @session.on("error")
+    def on_error(event):
+        logger.error(f"AgentSession error: {event.error}")
+
+    # Start the session with our assistant
+    logger.info("Starting AgentSession...")
+    await session.start(room=ctx.room, agent=TeluguAssistant(system_instruction))
+    
+    # Wait a brief moment to allow connection to stabilize before greeting
+    await asyncio.sleep(1.0)
+    
+    # Greet the user in Telugu
+    logger.info(f"Sending greeting: {greeting_text}")
+    session.say(greeting_text)
+
+    # Keep the task running while session is active
+    await session.wait_for_inactive()
+    logger.info(f"Agent session completed for room: {ctx.room.name}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))

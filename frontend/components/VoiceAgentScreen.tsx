@@ -71,13 +71,14 @@ function decodeUTF8(bytes: Uint8Array): string {
 
 export default function VoiceAgentScreen() {
   // Config states
-  const [serverUrl, setServerUrl] = useState<string>('http://10.218.49.70:8000'); // Default to emulator gateway IP
+  const [serverUrl, setServerUrl] = useState<string>('http://10.212.35.70:8000'); // Default to emulator gateway IP
   const [showSettings, setShowSettings] = useState<boolean>(false);
 
   // Connection & Room states
   const [status, setStatus] = useState<AgentStatus>('disconnected');
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [persona, setPersona] = useState<'prank' | 'support' | 'real_estate'>('support');
 
   // Ref to store the LiveKit Room object
   const roomRef = useRef<Room | null>(null);
@@ -219,6 +220,7 @@ export default function VoiceAgentScreen() {
         headers: {
           'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ persona }),
       });
 
       if (!response.ok) {
@@ -330,19 +332,19 @@ export default function VoiceAgentScreen() {
     };
   }, []);
 
-  // Format statuses into user friendly Telugu texts
+  // Format statuses into user friendly English texts
   const getStatusText = () => {
     switch (status) {
       case 'disconnected':
-        return 'డిస్కనెక్ట్ చేయబడింది';
+        return 'Disconnected';
       case 'connecting':
-        return 'కనెక్ట్ అవుతోంది...';
+        return 'Connecting...';
       case 'connected':
-        return 'నేను సిద్ధంగా ఉన్నాను, మాట్లాడండి';
+        return 'Ready — start speaking';
       case 'listening':
-        return 'నేను వింటున్నాను...';
+        return 'Listening...';
       case 'speaking':
-        return 'నవ్య మాట్లాడుతోంది...';
+        return 'Navya is speaking...';
       default:
         return '';
     }
@@ -355,8 +357,8 @@ export default function VoiceAgentScreen() {
       {/* Header Bar */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.headerTitle}>నవ్య</Text>
-          <Text style={styles.headerSubtitle}>తెలుగు AI సహాయకురాలు</Text>
+          <Text style={styles.headerTitle}>Navya</Text>
+          <Text style={styles.headerSubtitle}>Telugu AI Voice Assistant</Text>
         </View>
         <TouchableOpacity
           style={styles.settingsButton}
@@ -369,7 +371,7 @@ export default function VoiceAgentScreen() {
       {/* Collapsible Settings Drawer */}
       {showSettings && (
         <View style={styles.settingsPanel}>
-          <Text style={styles.settingsLabel}>సర్వర్ URL (FastAPI Backend):</Text>
+          <Text style={styles.settingsLabel}>Server URL (FastAPI Backend):</Text>
           <TextInput
             style={styles.settingsInput}
             value={serverUrl}
@@ -380,8 +382,41 @@ export default function VoiceAgentScreen() {
             autoCorrect={false}
           />
           <Text style={styles.settingsHint}>
-            * మొబైల్ వైఫై ద్వారా మీ కంప్యూటర్ లోకల్ IP తో కనెక్ట్ చేయండి. (ఉదా: http://192.168.1.100:8000)
+            * Connect via your computer's local IP over WiFi. (e.g. http://192.168.1.100:8000)
           </Text>
+        </View>
+      )}
+
+      {/* Options/Persona Selector */}
+      {status === 'disconnected' && (
+        <View style={styles.personaContainer}>
+          <Text style={styles.personaLabel}>Select Agent Role:</Text>
+          <View style={styles.personaButtonsContainer}>
+            <TouchableOpacity
+              style={[styles.personaButton, persona === 'prank' && styles.personaButtonActive]}
+              onPress={() => setPersona('prank')}
+            >
+              <Text style={[styles.personaButtonText, persona === 'prank' && styles.personaButtonTextActive]}>
+                😜 Prank
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.personaButton, persona === 'support' && styles.personaButtonActive]}
+              onPress={() => setPersona('support')}
+            >
+              <Text style={[styles.personaButtonText, persona === 'support' && styles.personaButtonTextActive]}>
+                🛠️ Support
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.personaButton, persona === 'real_estate' && styles.personaButtonActive]}
+              onPress={() => setPersona('real_estate')}
+            >
+              <Text style={[styles.personaButtonText, persona === 'real_estate' && styles.personaButtonTextActive]}>
+                🏢 Real Estate
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -404,7 +439,7 @@ export default function VoiceAgentScreen() {
 
       {/* Conversation Log Bubble Container */}
       <View style={styles.logContainer}>
-        <Text style={styles.logHeader}>సంభాషణ వివరాలు</Text>
+        <Text style={styles.logHeader}>Conversation</Text>
         <ScrollView
           ref={scrollViewRef}
           style={styles.logScrollView}
@@ -412,7 +447,7 @@ export default function VoiceAgentScreen() {
         >
           {messages.length === 0 ? (
             <Text style={styles.placeholderLogText}>
-              ఇక్కడ మీ సంభాషణ కనిపిస్తుంది. మాట్లాడటం ప్రారంభించండి...
+              Your conversation will appear here. Start speaking...
             </Text>
           ) : (
             messages.map((msg) => (
@@ -441,11 +476,11 @@ export default function VoiceAgentScreen() {
       <View style={styles.footer}>
         {status === 'disconnected' ? (
           <TouchableOpacity style={[styles.button, styles.connectButton]} onPress={connectSession}>
-            <Text style={styles.buttonText}>కనెక్ట్ చేయి</Text>
+            <Text style={styles.buttonText}>Connect</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity style={[styles.button, styles.disconnectButton]} onPress={disconnectSession}>
-            <Text style={styles.buttonText}>డిస్కనెక్ట్ చేయి</Text>
+            <Text style={styles.buttonText}>Disconnect</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -664,5 +699,50 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: 'bold',
     letterSpacing: 0.5,
+  },
+  personaContainer: {
+    paddingHorizontal: 20,
+    marginVertical: 15,
+  },
+  personaLabel: {
+    color: '#8892B0',
+    fontSize: 13,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    marginBottom: 10,
+    letterSpacing: 0.5,
+  },
+  personaButtonsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: '#1E1F26',
+    borderRadius: 12,
+    padding: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  personaButton: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  personaButtonActive: {
+    backgroundColor: '#00F2FE',
+    shadowColor: '#00F2FE',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  personaButtonText: {
+    color: '#8892B0',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  personaButtonTextActive: {
+    color: '#0B0C10',
+    fontWeight: 'bold',
   },
 });

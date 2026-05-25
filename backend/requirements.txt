@@ -1,7 +1,11 @@
 fastapi>=0.100.0
 uvicorn>=0.22.0
 python-dotenv>=1.0.0
-pipecat-ai[livekit,openrouter,groq,silero]>=0.0.105
+livekit-agents~=1.5
+livekit-plugins-groq
+livekit-plugins-google
+livekit-plugins-silero
+livekit-plugins-turn-detector
 livekit-api>=0.2.0
 aiohttp>=3.8.0
-websockets>=12.0
+loguru>=0.7.0
